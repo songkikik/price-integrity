@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 의존성 / 빌드
+dist/
+build/
+*.egg
+
+# 환경 변수 / 시크릿
+.env
+.env.local
+.env.*.local
+*.secret
+secrets/
+keys/
+*.kubeconfig
+*-credentials.json
+service-account*.json
+
+# dbt
+target/
+logs/
+dbt_packages/
+.user.yml
+
+# Airflow (로컬 테스트 산출물)
+airflow.db
+airflow.cfg
+webserver_config.py
+airflow-webserver.pid
+standalone_admin_password.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 로그
+*.log
+logs/
+
+# Helm 임시 파일
+charts/
+*.tgz
