@@ -1,0 +1,5 @@
+source_code,source_name,api_type,rate_limit_per_min,home_url,is_active
+upbit,Upbit,rest,600,https://upbit.com,true
+bithumb,Bithumb,rest,8100,https://bithumb.com,true
+binance,Binance,rest,6000,https://binance.com,false
+bybit,Bybit,rest,7200,https://bybit.com,false

@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: int_crypto__price_tick_long
+    description: |
+      crypto 자산의 소스별 분 단위 시세를 long 포맷으로 통합한 중간 모델.
+      Grain: (asset_code, source_code, ts_minute_utc) — 자산 × 소스 × 분 1행.
+      D1 정책상 1분 내 다중 tick은 ts_utc 최대(last tick = close) 1건만 채택.
+      소스 간 spread 계산(fct_crypto__price_spread)의 직접 입력.
+    columns:
+      - name: asset_code
+        description: "자산 코드 (v0.1은 'BTCKRW')"
+        tests:
+          - not_null
+      - name: source_code
+        description: "소스 코드 ('upbit' | 'bithumb')"
+        tests:
+          - not_null
+      - name: ts_minute_utc
+        description: "분 단위 시각 UTC. 소스 간 비교의 조인 키. PK 구성 요소."
+        tests:
+          - not_null
+      - name: price
+        description: "해당 분의 마감가(close, KRW)."
+        tests:
+          - not_null
+      - name: quote_ccy
+        description: "가격 표시 통화 (항상 'KRW')"
+        tests:
+          - not_null
+      - name: volume_24h
+        description: "24h 누적 거래량 (BTC). nullable."
+      - name: tick_ts_utc
+        description: "채택된 tick의 원본 체결 시각 UTC. clock skew·추적용."
+        tests:
+          - not_null
+      - name: ingested_at
+        description: "collector INSERT 시각 UTC."
+        tests:
+          - not_null

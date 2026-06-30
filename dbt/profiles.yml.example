@@ -1,0 +1,20 @@
+# ==========================================
+# dbt-clickhouse 연결 설정 템플릿
+# 사용법: cp dbt/profiles.yml.example ~/.dbt/profiles.yml 후 값 입력
+# 이 파일은 커밋 O. 실제 profiles.yml은 .gitignore 처리됨.
+# ==========================================
+
+price_integrity:
+  target: dev
+  outputs:
+    dev:
+      type: clickhouse
+      schema: price_integrity          # ClickHouse 데이터베이스명
+      host: "{{ env_var('CLICKHOUSE_HOST', 'localhost') }}"
+      port: 8123                       # HTTP interface (native TCP = 9000)
+      user: "{{ env_var('CLICKHOUSE_USER', 'default') }}"
+      password: "{{ env_var('CLICKHOUSE_PASSWORD', '') }}"
+      secure: false
+      verify: false
+      connect_timeout: 10
+      send_receive_timeout: 300

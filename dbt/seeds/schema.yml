@@ -1,0 +1,58 @@
+version: 2
+
+seeds:
+  - name: dim_asset
+    description: "자산 차원 테이블. v0.1 is_active=true 는 BTCKRW(PoC)만."
+    columns:
+      - name: asset_code
+        description: "자산 식별자 (PK). 예: BTCKRW, BTCUSDT"
+        tests:
+          - not_null
+          - unique
+      - name: base_ccy
+        description: "기준 자산. 예: BTC, ETH, USD"
+        tests:
+          - not_null
+      - name: quote_ccy
+        description: "가격 표시 통화. 예: KRW, USDT, USD"
+        tests:
+          - not_null
+      - name: market_type
+        description: "도메인 구분. crypto(24h×7) / fx(평일 24h) / equity(장 시간)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['crypto', 'fx', 'equity']
+      - name: is_active
+        description: "현재 수집 활성 여부. v0.1 = BTCKRW만 true"
+        tests:
+          - not_null
+
+  - name: dim_source
+    description: "데이터 소스 차원 테이블. v0.1 is_active=true 는 upbit + bithumb만."
+    columns:
+      - name: source_code
+        description: "소스 식별자 (PK). 예: upbit, bithumb"
+        tests:
+          - not_null
+          - unique
+      - name: source_name
+        description: "소스 표시명"
+        tests:
+          - not_null
+      - name: api_type
+        description: "API 방식. rest / websocket / scrape"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['rest', 'websocket', 'scrape']
+      - name: rate_limit_per_min
+        description: "분당 요청 한도. Binance는 weight/min 기준(endpoint weight=1 기준)."
+        tests:
+          - not_null
+      - name: home_url
+        description: "거래소/제공처 홈페이지 URL"
+      - name: is_active
+        description: "현재 수집 활성 여부. v0.1 = upbit + bithumb만 true"
+        tests:
+          - not_null

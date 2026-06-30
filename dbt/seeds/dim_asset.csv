@@ -1,0 +1,7 @@
+asset_code,base_ccy,quote_ccy,market_type,is_active
+BTCKRW,BTC,KRW,crypto,true
+BTCUSDT,BTC,USDT,crypto,false
+ETHKRW,ETH,KRW,crypto,false
+USDKRW,USD,KRW,fx,false
+KOSPI,KOSPI,KRW,equity,false
+SP500,SP500,USD,equity,false

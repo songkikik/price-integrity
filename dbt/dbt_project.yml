@@ -1,0 +1,28 @@
+name: 'price_integrity'
+version: '0.1.0'
+config-version: 2
+
+profile: 'price_integrity'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  price_integrity:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: view
+    marts:
+      +materialized: table
+
+seeds:
+  price_integrity:
+    +quote_columns: false

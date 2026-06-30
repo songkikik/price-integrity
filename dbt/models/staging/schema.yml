@@ -1,0 +1,78 @@
+version: 2
+
+models:
+  - name: stg_upbit__price_tick
+    description: "Upbit raw ticker를 공통 스키마로 정규화. Grain: (asset_code, source_code, ts_utc). 동일 ts_utc 중복 시 최신 ingested_at 우선."
+    columns:
+      - name: asset_code
+        description: "자산 코드 (항상 'BTCKRW')"
+        tests:
+          - not_null
+      - name: source_code
+        description: "소스 코드 (항상 'upbit')"
+        tests:
+          - not_null
+      - name: ts_utc
+        description: "체결 시각 UTC. Upbit trade_timestamp(ms) 변환. PK 구성 요소."
+        tests:
+          - not_null
+      - name: ts_minute_utc
+        description: "ts_utc를 분 단위로 floor. int 레이어 조인 키."
+        tests:
+          - not_null
+      - name: price
+        description: "체결가 (KRW). Upbit trade_price."
+        tests:
+          - not_null
+      - name: quote_ccy
+        description: "가격 표시 통화 (항상 'KRW')"
+        tests:
+          - not_null
+      - name: volume_24h
+        description: "24h 누적 거래량 (BTC). Upbit acc_trade_volume_24h. nullable."
+      - name: raw_payload_id
+        description: "raw_upbit__ticker.ingested_at → string 변환. 역추적 키."
+        tests:
+          - not_null
+      - name: ingested_at
+        description: "collector INSERT 시각 UTC."
+        tests:
+          - not_null
+
+  - name: stg_bithumb__price_tick
+    description: "Bithumb raw ticker를 공통 스키마로 정규화. Grain: (asset_code, source_code, ts_utc). 모든 숫자가 STRING으로 와서 CAST 필요. trade_timestamp 없어 date(ms)를 ts_utc로 사용."
+    columns:
+      - name: asset_code
+        description: "자산 코드 (항상 'BTCKRW')"
+        tests:
+          - not_null
+      - name: source_code
+        description: "소스 코드 (항상 'bithumb')"
+        tests:
+          - not_null
+      - name: ts_utc
+        description: "체결 시각 UTC. Bithumb date(string ms) → toUInt64 변환. PK 구성 요소."
+        tests:
+          - not_null
+      - name: ts_minute_utc
+        description: "ts_utc를 분 단위로 floor. int 레이어 조인 키."
+        tests:
+          - not_null
+      - name: price
+        description: "현재가 (KRW). Bithumb closing_price(string) → toFloat64."
+        tests:
+          - not_null
+      - name: quote_ccy
+        description: "가격 표시 통화 (항상 'KRW')"
+        tests:
+          - not_null
+      - name: volume_24h
+        description: "24h 누적 거래량 (BTC). Bithumb units_traded_24H(string) → toFloat64. nullable."
+      - name: raw_payload_id
+        description: "raw_bithumb__ticker.ingested_at → string 변환. 역추적 키."
+        tests:
+          - not_null
+      - name: ingested_at
+        description: "collector INSERT 시각 UTC."
+        tests:
+          - not_null
