@@ -26,3 +26,9 @@ models:
 seeds:
   price_integrity:
     +quote_columns: false
+
+vars:
+  # 이상치 감지 임계 (spread_pct = 소스 간 상대 괴리율). 실데이터 분포 보고 재조정 예정.
+  # 검증 시 임시 하향 예: dbt run --vars '{anomaly_warn_pct: 0.0003, anomaly_critical_pct: 0.0004}'
+  anomaly_warn_pct: 0.005      # 0.5% — warn (2분 연속 지속 시 발화)
+  anomaly_critical_pct: 0.02   # 2.0% — critical (즉시 발화)

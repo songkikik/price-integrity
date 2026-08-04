@@ -39,6 +39,42 @@ models:
       - name: spread_pct
         description: "spread_abs / price_median. 소스 간 상대 괴리율. nullable(median=0 시)."
       - name: is_anomaly
-        description: "v0.1 단순 플래그: 소스 2개 이상 + spread_pct > 0.5%. severity·연속성은 anomaly_event 레이어(미구현)."
+        description: "v0.1 단순 플래그: 소스 2개 이상 + spread_pct > 0.5%. severity·연속성 판정은 fct_crypto__anomaly_event 레이어 책임."
+        tests:
+          - not_null
+
+  - name: fct_crypto__anomaly_event
+    description: |
+      소스 간 괴리가 임계를 넘은 '이상 이벤트' 감지 로그. 감지 = 결정론적/멱등 (D4).
+      Grain: (asset_code, ts_minute_utc, rule_code) — 한 분에 warn·critical 둘 다 발화 시 각각 1행.
+      비즈니스 owner: 김기훈 (price-integrity). 임계는 dbt var(anomaly_warn_pct/anomaly_critical_pct)로 파라미터화.
+      cooldown·중복 억제는 여기 없음 → 통지 정책은 fct_crypto__notification_dispatch(미구현) 책임.
+    columns:
+      - name: asset_code
+        description: "자산 코드 (v0.1은 'BTCKRW'). PK 구성 요소."
+        tests:
+          - not_null
+      - name: ts_minute_utc
+        description: "이벤트 발생 분(UTC). PK 구성 요소."
+        tests:
+          - not_null
+      - name: rule_code
+        description: "발화 룰 ('critical' | 'warn_2min'). PK 구성 요소."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['critical', 'warn_2min']
+      - name: severity
+        description: "심각도 ('critical' | 'warn')."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['critical', 'warn']
+      - name: spread_pct
+        description: "발화 시점의 소스 간 상대 괴리율."
+        tests:
+          - not_null
+      - name: threshold_pct
+        description: "해당 룰의 임계값 (발화 당시 var 값)."
         tests:
           - not_null
