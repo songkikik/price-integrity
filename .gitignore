@@ -17,6 +17,9 @@ dist/
 build/
 *.egg
 
+# notifier 상태 (발송 watermark)
+notifier/.slack_watermark
+
 # 환경 변수 / 시크릿
 .env
 .env.local

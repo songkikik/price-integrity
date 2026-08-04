@@ -78,3 +78,40 @@ models:
         description: "해당 룰의 임계값 (발화 당시 var 값)."
         tests:
           - not_null
+
+  - name: fct_crypto__notification_dispatch
+    description: |
+      anomaly_event 중 실제 알림 발송 대상만 선별한 통지 이력. 통지 = 정책 의존/비멱등 (D4).
+      Grain: dispatch_id — 1 발송 결정 = 1행. append-only(incremental)로 이력 누적.
+      비즈니스 owner: 김기훈 (price-integrity). cooldown은 dbt var(dispatch_*_cooldown_min).
+      실제 Slack 발송은 dbt 밖(Python)이 이 테이블을 소비해 수행.
+    columns:
+      - name: dispatch_id
+        description: "발송 식별자 (UUID). PK."
+        tests:
+          - not_null
+          - unique
+      - name: dispatched_at
+        description: "발송 결정 시각 UTC."
+        tests:
+          - not_null
+      - name: source_asset_code
+        description: "원천 이벤트 자산 코드."
+        tests:
+          - not_null
+      - name: source_ts_minute_utc
+        description: "원천 이벤트 발생 분(UTC). cooldown watermark로도 사용."
+        tests:
+          - not_null
+      - name: rule_code
+        description: "발화 룰 ('critical' | 'warn_2min')."
+        tests:
+          - not_null
+      - name: severity
+        description: "심각도 ('critical' | 'warn')."
+        tests:
+          - not_null
+      - name: spread_pct
+        description: "발화 시점 괴리율."
+        tests:
+          - not_null

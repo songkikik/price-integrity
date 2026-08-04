@@ -32,3 +32,6 @@ vars:
   # 검증 시 임시 하향 예: dbt run --vars '{anomaly_warn_pct: 0.0003, anomaly_critical_pct: 0.0004}'
   anomaly_warn_pct: 0.005      # 0.5% — warn (2분 연속 지속 시 발화)
   anomaly_critical_pct: 0.02   # 2.0% — critical (즉시 발화)
+  # 알림 cooldown (분). 같은 (asset, severity) 재알림 억제. severity별 독립.
+  dispatch_warn_cooldown_min: 10
+  dispatch_critical_cooldown_min: 5

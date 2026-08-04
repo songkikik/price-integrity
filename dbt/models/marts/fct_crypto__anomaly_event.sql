@@ -57,7 +57,9 @@ warn_events as (
         spread_pct,
         {{ warn_pct }}          as threshold_pct
     from with_prev
-    where 1 = 0   -- TODO(나): 위 주석의 조건 3개로 교체
+    where spread_pct > {{ warn_pct }}                                  -- 이번 분 초과
+      and prev_spread_pct > {{ warn_pct }}                            -- 직전 분도 초과
+      and prev_ts_minute_utc = ts_minute_utc - INTERVAL 1 MINUTE      -- 그 직전이 정확히 1분 전(연속 보장)
 )
 
 select * from critical_events
