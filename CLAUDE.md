@@ -63,7 +63,11 @@
 - **스케일업 도메인 결정 보류**: 글로벌 호가창 arbitrage(정합성 심화, 추천) vs 항공기 추적(정합성 이탈=별도 프로젝트) → 마일스톤 1 완성 후 판단.
 - **제외**: v0.4 k8s(k3s)/Airflow — "24/7 상시가동·셀프힐"용이라 "받고 싶을 때만" 성격과 정반대.
 
-## 현재 상태 (2026-07-06)
+## 현재 상태 (2026-08-10)
 
-- ✅ 마일스톤 1 파이프라인 검증 성공. Upbit↔Bithumb BTC/KRW는 분 단위로 **매우 정합적**(괴리 0.002~0.052%, 임계 0.5% 대비 10배 여유) → 실데이터엔 anomaly 자연 발생 안 함.
-- 🔜 **다음 = 3단계 `fct_crypto__anomaly_event`** (임계는 dbt `var`로 파라미터화 → 검증 시 임시 하향으로 이상치 유발).
+- ✅ **마일스톤 1(v0.1) 완성·검증.** anomaly_event·notification_dispatch·slack_notify 전부 구현. Upbit↔Bithumb BTC/KRW는 분 단위로 **매우 정합적**(괴리 0.002~0.052%) → 실데이터 anomaly 자연 발생 안 함.
+- 🔜 **v0.2 진행 중 (1~3단계 골격 완료):**
+  - 스펙 조사 확정: 둘 다 무인증. Upbit=`wss://api.upbit.com/websocket/v1`, Bithumb 2.x=`wss://ws-api.bithumb.com/websocket/v1` — **응답 포맷 동일(Upbit 표준)**. 구독 `[{ticket},{type:ticker,codes:[KRW-BTC]},{format}]`. **120초 idle timeout** → ping·재접속 필수. `ticker` 타입으로 시작(회귀 기준점 유지).
+  - `websockets==17.0.1` 추가 / `raw_ws__ticker`(단일 테이블+source_code, 논점①) DDL / `ws_collector.py`(비동기 2소스, ping keepalive+지수 백오프 재접속, **혼합 flush=size 500 OR time 5s** 구현).
+  - **다음 세션(라이브 검증부터)**: `docker compose up -d` → `raw_ws__ticker` **수동 생성**(볼륨 기존이라 auto-run 안 됨, `docker exec ... < scripts/clickhouse-init/02_create_ws_raw_tables.sql`) → collector 가동해 적재 확인 → **4단계 `stg_ws__price_tick`(동일 9컬럼)** → **5단계 회귀 확인**.
+  - 미해결(사프라 보류): should_flush는 메시지 도착 시에만 평가 → 완전 무음 구간 시간조건 지연. 정석은 별도 타이머 task(v0.3 Kafka가 대체).
