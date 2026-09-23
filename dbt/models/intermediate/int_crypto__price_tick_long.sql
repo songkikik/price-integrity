@@ -2,6 +2,8 @@
 -- grain: asset_code × source_code × ts_minute_utc (= 자산 × 소스 × 분, 1행)
 -- D1 정책: 1분 내 다중 tick은 last tick(close) = ts_utc 최대값 1건만 채택.
 
+-- v0.2: 소스를 WS 단일 stg로 전환 (stg_ws에 upbit+bithumb 두 소스가 이미 섞여 있음).
+-- REST stg_upbit/stg_bithumb 은 롤백용 보존(미참조). UNION 불필요 → 단일 select.
 with unioned as (
     select
         asset_code,
@@ -12,20 +14,7 @@ with unioned as (
         quote_ccy,
         volume_24h,
         ingested_at
-    from {{ ref('stg_upbit__price_tick') }}
-
-    union all
-
-    select
-        asset_code,
-        source_code,
-        ts_utc,
-        ts_minute_utc,
-        price,
-        quote_ccy,
-        volume_24h,
-        ingested_at
-    from {{ ref('stg_bithumb__price_tick') }}
+    from {{ ref('stg_ws__price_tick') }}
 ),
 
 minute_close as (

@@ -35,3 +35,22 @@ sources:
               - date: 서버 응답 시각 (Unix ms, STRING). trade_timestamp 없음 → D2 정책상 이 값을 ts_utc로 사용.
               - units_traded_24H: 24h 누적 거래량 (STRING, BTC)
               ※ 모든 숫자 필드가 STRING으로 반환됨 — stg에서 CAST 필수.
+
+      - name: raw_ws__ticker
+        description: |
+          v0.2 WebSocket ticker 원본 (Upbit + Bithumb 2.x 공용, 단일 테이블).
+          ws_collector가 ingested_at + source_code('upbit'|'bithumb') + raw_payload(WS 메시지 JSON) 를 INSERT.
+          두 거래소가 Upbit 표준 포맷으로 동일 → 소스별 raw 분리 없이 source_code 컬럼으로 구분.
+        columns:
+          - name: ingested_at
+            description: "collector INSERT 시각 (UTC)"
+          - name: source_code
+            description: "거래소 구분 ('upbit'|'bithumb'). payload엔 거래소 정보가 없어 이 컬럼이 유일한 출처."
+          - name: raw_payload
+            description: |
+              WS ticker 메시지 JSON (양 소스 동일 스키마). 주요 필드:
+              - code: 마켓 코드 (STRING, 'KRW-BTC'). asset_code 매핑 대상.
+              - trade_price: 체결가 (NUMBER, KRW). upbit=소수·bithumb=정수지만 JSONExtractFloat로 공통 처리.
+              - trade_timestamp: 체결 시각 (Unix ms, INT). ts_utc 매핑 대상.
+              - acc_trade_volume_24h: 24h 누적 거래량 (NUMBER, BTC)
+              - stream_type: 'SNAPSHOT'(최초 1건) | 'REALTIME'(이후)
