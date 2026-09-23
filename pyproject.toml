@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "dbt-clickhouse>=1.8",
     "websockets>=17.0.1",
+    "aiokafka>=0.14.0",
 ]
 
 [dependency-groups]

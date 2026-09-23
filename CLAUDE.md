@@ -8,32 +8,54 @@
 ## 아키텍처
 
 ```
- [수집]                    [저장]              [변환 = dbt 4-layer]                     [알림]
- upbit_collector.py  ─┐                 raw ──> staging ──> intermediate ──> marts
- (REST 60s 폴링)      ├─> ClickHouse ─>  (JSON)  (정규화)    (소스 union)    (spread/anomaly) ─> Slack
- bithumb_collector.py ┘   (Docker)                                                              webhook
+ [수집=producer]        [버퍼]            [적재=consumer]      [변환 = dbt 4-layer]              [알림]
+ ws_collector.py  ──> Kafka ──────────> kafka_to_clickhouse ─> raw ─> stg ─> int ─> marts ─> Slack
+ (WS push, 2소스)     crypto.ticker.v1   (at-least-once)       (JSON) (정규화) (분집계) (spread)  webhook
+                      파티션 3·key=source_code                  └─ ClickHouse (Docker) ─┘
 ```
+
+**v0.3 디커플링**: 수집과 적재가 별개 프로세스. ClickHouse가 죽어도 수집은 계속되고(토픽에 쌓임),
+적재만 다시 돌리고 싶으면 오프셋을 되감아 replay 한다. producer만 늘리면 소스 추가도 무중단.
 
 | 계층 | 산출물 | 책임 | materialization |
 |---|---|---|---|
-| 수집 | `collectors/*.py` | 거래소 REST 폴링 → raw에 JSON append | Python 스크립트 |
-| raw | `raw_{src}__ticker` | 원본 JSON 보존 (파싱 안 함) | ClickHouse table |
-| staging | `stg_{src}__price_tick` | JSON → 공통 스키마 정규화 (타입·단위 통일) | view |
-| intermediate | `int_crypto__price_tick_long` | 소스 UNION + 분당 last tick 채택 | view |
+| 수집 | `collectors/ws_collector.py` | 거래소 WS push → sink(Kafka 또는 ClickHouse)에 batch write | Python (asyncio) |
+| 버퍼 | Kafka `crypto.ticker.v1` | envelope 보관 = 수집/적재 분리점. key=source_code로 소스별 순서 보장 | 파티션 3 · RF 1 |
+| 적재 | `loader/kafka_to_clickhouse.py` | consumer → raw에 batch insert. 수동 오프셋 커밋(at-least-once) | Python (asyncio) |
+| raw | `raw_ws__ticker` | 원본 JSON 보존 (파싱 안 함) | ClickHouse table |
+| staging | `stg_ws__price_tick` | JSON → 공통 스키마 정규화 + grain dedup | view |
+| intermediate | `int_crypto__price_tick_long` | 분당 last tick 채택 | view |
 | marts | `fct_crypto__price_spread` 등 | 분×자산 grain spread·anomaly·notification | table |
 
 ## 스택 · 실행법
 
 - **DW**: ClickHouse (Docker, `clickhouse_data` named volume로 영속). HTTP 8123 / native 9000.
+- **버퍼**: Kafka 3.9 KRaft 단일 브로커 (Docker, `kafka_data` volume). PLAINTEXT 9092.
 - **변환**: dbt-clickhouse 1.10.x. **Python 3.12 핀** (uv).
 - **재개 명령**:
   ```bash
   cd ~/projects/price-integrity && docker compose up -d      # 볼륨 유지 = 데이터 보존
-  # collector (동시 가동해야 겹치는 분 확보됨)
-  uv run python collectors/upbit_collector.py &
-  uv run python collectors/bithumb_collector.py &
+  ./scripts/kafka-init/create_topics.sh                      # 토픽 생성 (멱등, 최초 1회면 충분)
+
+  # v0.3 경로: producer / consumer 를 각각 띄운다 (별개 프로세스 = 디커플링)
+  uv run python collectors/ws_collector.py --sink kafka &
+  uv run python loader/kafka_to_clickhouse.py &
+
+  # v0.2 롤백 경로 (Kafka 없이 ClickHouse 직결)
+  # uv run python collectors/ws_collector.py
+
   # dbt
-  cd dbt && uv run dbt run --profiles-dir . && uv run dbt test --profiles-dir .
+  cd dbt && uv run dbt build --profiles-dir .
+  ```
+- **운영 확인 명령** (Kafka):
+  ```bash
+  # lag = 아직 적재 안 된 메시지 수. 0이면 consumer가 따라잡은 상태.
+  docker exec price-integrity-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+    --bootstrap-server localhost:9092 --describe --group ch-loader
+  # replay = 오프셋 되감기 (consumer 정지 상태에서만 가능). --dry-run 으로 먼저 확인할 것.
+  docker exec price-integrity-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+    --bootstrap-server localhost:9092 --group ch-loader --topic crypto.ticker.v1 \
+    --reset-offsets --to-earliest --execute
   ```
 - `.env` / `profiles.yml` / `.venv` 는 gitignore. profiles.yml은 env_var 기본값(localhost/default/빈비번)으로 `.env` 없이도 연결됨.
 
@@ -58,12 +80,32 @@
 |---|---|---|
 | **마일스톤 1** (v0.1) | end-to-end 완성 | ✅ 겹침·fct_spread 검증 → ③ `anomaly_event` → ④ `notification_dispatch` → Slack |
 | **v0.2** | 진짜 실시간 수집 | collector REST 폴링 → **WebSocket push** 전환. 연결관리(재접속·heartbeat), tick 수집. 기존 stg/int/mart **출력 동일성 = 회귀 기준점** |
-| **v0.3** | 수집·저장 분리 | collector=**producer** → Kafka 토픽 → loader=**consumer** → ClickHouse. offset·replay 학습. 소스 확장(Coinone·Korbit·Gopax, 최대 5개)으로 producer 다변화 |
+| **v0.3** | 수집·저장 분리 | ✅ collector=**producer** → Kafka 토픽 → loader=**consumer** → ClickHouse. offset·replay 학습 완료. 🔜 소스 확장(Coinone·Korbit·Gopax, 최대 5개)으로 producer 다변화 |
 
 - **스케일업 도메인 결정 보류**: 글로벌 호가창 arbitrage(정합성 심화, 추천) vs 항공기 추적(정합성 이탈=별도 프로젝트) → 마일스톤 1 완성 후 판단.
 - **제외**: v0.4 k8s(k3s)/Airflow — "24/7 상시가동·셀프힐"용이라 "받고 싶을 때만" 성격과 정반대.
 
-## 현재 상태 (2026-08-30)
+## 현재 상태 (2026-09-23)
+
+- ✅ **v0.3 Kafka 디커플링 완성 (0~4단계).** dbt **0줄 수정**으로 통과 = 회귀 기준점 유지.
+  - 구성: Kafka 3.9 KRaft 단일 브로커 / 토픽 `crypto.ticker.v1`(파티션 3·RF 1·auto-create off) /
+    envelope `{source_code, ingested_at, payload}` = `raw_ws__ticker` 3컬럼과 1:1 동형(그래서 dbt 무수정).
+  - `ws_collector.py`에 **sink 분기** 추가(`--sink kafka|clickhouse`). 연결관리·버퍼 로직은 그대로 재사용,
+    기본값 `clickhouse` = v0.2 경로가 롤백 수단으로 남음.
+  - `loader/kafka_to_clickhouse.py` 신규: `enable_auto_commit=False` + **insert → commit 순서 = at-least-once**.
+    근거는 "유실은 비가역, 중복은 `stg_ws`의 `qualify row_number()` dedup이 흡수".
+  - **검증(2026-09-23)**: 2만여 건 E2E. lag 0 · stg grain 중복 0 · dbt PASS=79/ERROR=0 ·
+    167분 중 164분 n_sources_active=2 · spread 0~0.1083% · anomaly/dispatch 0행(운영임계 0.5% 대비 정합).
+  - **replay 실증**: 오프셋 `--to-earliest` 되감아 재적재 → raw 41,920→62,871(+20,951 중복)인데
+    **stg 10,257 동일 · spread_pct 합계 0.0625834354 소수 10자리까지 동일**. at-least-once + 하류 멱등 증명.
+  - ⚠️ 검증 함정: `stg`는 view(조회 시점 계산), `spread`는 table(build 시점 고정) → 레이어마다 시점이 다름.
+    정합성 비교는 **모든 유입 정지 → build 1회 → 스냅샷** 순서를 지킬 것. (1차 실험이 이것 때문에 어긋남)
+  - ⚠️ 미정리: replay 할 때마다 raw가 2만 행씩 붐. 실무라면 `ReplacingMergeTree`나 구간 삭제 절차 필요 —
+    학습용이라 의도적으로 방치 중.
+- 🔜 **다음**: v0.3 5단계 = 무중단 소스 추가(Coinone/Korbit **WS 스펙 조사 선행**).
+  Upbit 표준 포맷이 아니면 `stg_ws` 단일 모델 전제가 깨지므로 조사 결과 보고 판단.
+
+## 이전 상태 (2026-08-30)
 
 - ✅ **마일스톤 1(v0.1) 완성·검증.** anomaly_event·notification_dispatch·slack_notify 전부 구현. Upbit↔Bithumb BTC/KRW는 분 단위로 **매우 정합적**(괴리 0.002~0.052%) → 실데이터 anomaly 자연 발생 안 함.
 - ✅ **v0.2 WebSocket 전환 완성 (0~6단계).** REST 폴링 → WS push. int/mart 로직 무수정·FROM만 교체 = 회귀 기준점(논점③) 지켜짐.

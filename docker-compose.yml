@@ -23,5 +23,41 @@ services:
       timeout: 5s
       retries: 5
 
+  # v0.3: 수집(producer)과 저장(consumer) 사이의 버퍼.
+  # KRaft 모드 = ZooKeeper 없이 브로커가 컨트롤러 역할도 겸함 (단일 컨테이너로 충분한 이유).
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: price-integrity-kafka
+    ports:
+      - "9092:9092"   # PLAINTEXT — 호스트에서 실행하는 producer/consumer가 붙는 포트
+    environment:
+      # --- KRaft 필수 3종 (node id / 역할 / 쿼럼) ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      # --- 리스너: 9092=클라이언트, 9093=컨트롤러 내부통신 ---
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      # --- 단일 브로커라 복제본 1 (기본 3이면 내부 토픽 생성 실패) ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0   # 학습용: consumer 붙자마자 리밸런스
+      # --- 토픽 auto-create 금지: 파티션 수를 의도대로 고정하려면 명시 생성해야 함 ---
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # ClickHouse와 동시 구동 대비 JVM 힙 제한 (기본값은 맥북에 과함)
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
 volumes:
   clickhouse_data:
+  kafka_data:

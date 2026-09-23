@@ -102,8 +102,9 @@ price-integrity/
 ├── .env.example             # 환경변수 템플릿 (커밋 O, 값 X)
 ├── .gitignore
 ├── pyproject.toml           # Python 의존성 (uv)
-├── collectors/              # 소스별 시세 수집기 (Python)
+├── collectors/              # 시세 수집기 (v0.2 WebSocket, v0.3부터 Kafka producer)
 │   └── samples/             # API 응답 JSON 샘플 (raw 스키마 확정용)
+├── loader/                  # v0.3 Kafka consumer → ClickHouse 적재기
 ├── alerts/                  # Slack webhook notifier
 ├── airflow/
 │   └── dags/                # 1분 주기 수집 DAG
@@ -130,6 +131,7 @@ price-integrity/
 |---|---|
 | 인프라 | Ubuntu 22.04 LTS · k3s · Tailscale |
 | 오케스트레이션 | Apache Airflow (KubernetesExecutor) |
+| 스트리밍 | **Apache Kafka** (3.9 KRaft — v0.3부터 수집/적재 디커플링 버퍼) |
 | 저장 | **ClickHouse** (MergeTree — v0.1은 Docker Compose 로컬, k3s는 마일스톤 1 이후) |
 | 변환 | **dbt-clickhouse** |
 | 모니터링 | Prometheus · Grafana |

@@ -6,12 +6,20 @@ Upbit·Bithumb 2.x WS는 구독 메시지·응답 포맷이 동일(Upbit 표준)
 핵심 (WS라서 새로 생기는 것):
 - 연결관리: 120초 idle timeout → 라이브러리 ping_interval로 keepalive + 지수 백오프 재접속.
 - 적재: 체결마다 push(다발) → 메시지 1건마다 insert 금지(ClickHouse 파트 폭증).
-  버퍼에 모아 batch flush. flush 전략은 TickerBuffer.should_flush()에서 결정 (TODO 나).
+  버퍼에 모아 batch flush. flush 전략은 TickerBuffer.should_flush()에서 결정.
+
+v0.3: 버퍼가 내려갈 곳(sink)만 교체 가능하게 분리.
+- `--sink clickhouse` (기본): v0.2 경로 그대로 = 롤백 수단으로 보존.
+- `--sink kafka`: 토픽에 produce만 하고 끝. ClickHouse 적재는 loader/kafka_to_clickhouse.py 담당.
+  → 수집과 저장이 분리되어 ClickHouse가 죽어도 수집은 계속된다(= v0.3의 목적).
+연결관리·버퍼링 로직은 이 프로젝트의 핵심 자산이라 sink만 갈아끼우고 그대로 재사용한다.
 
 실행:
-  uv run python collectors/ws_collector.py
+  uv run python collectors/ws_collector.py                # ClickHouse 직결 (v0.2)
+  uv run python collectors/ws_collector.py --sink kafka   # Kafka producer (v0.3)
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -21,6 +29,7 @@ from datetime import datetime, timezone
 
 import clickhouse_connect
 import websockets
+from aiokafka import AIOKafkaProducer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -64,16 +73,68 @@ def get_client():
     )
 
 
+class ClickHouseSink:
+    """v0.2 경로: 버퍼를 raw_ws__ticker에 직접 batch insert."""
+
+    COLUMNS = ["ingested_at", "source_code", "raw_payload"]
+
+    def __init__(self) -> None:
+        self.client = None
+
+    async def start(self) -> None:
+        self.client = get_client()
+        log.info("sink=clickhouse (v0.2 직결 경로)")
+
+    async def write(self, rows: list[list]) -> None:
+        self.client.insert("raw_ws__ticker", rows, column_names=self.COLUMNS)
+
+
+class KafkaSink:
+    """v0.3 경로: 버퍼를 Kafka 토픽에 produce. ClickHouse는 쳐다보지도 않는다.
+
+    메시지 = envelope JSON {source_code, ingested_at, payload}.
+    raw_ws__ticker의 3컬럼과 1:1 동형이라 consumer가 파싱 없이 그대로 insert할 수 있고,
+    그 덕에 dbt(stg 이하)는 한 줄도 안 바뀐다 = 회귀 기준점 유지.
+    payload는 WS 원본 문자열 그대로 담는다(파싱 후 재직렬화하면 raw=원본 보존 원칙이 깨짐).
+
+    key=source_code → 같은 소스의 틱은 항상 같은 파티션 = 소스별 시계열 순서 보장.
+    정합성 프로젝트에서 순서 역전은 곧 가짜 spread이므로 파티션 키가 정합성 경계다.
+    """
+
+    def __init__(self) -> None:
+        self.producer = None
+        self.topic = os.environ.get("KAFKA_TOPIC", "crypto.ticker.v1")
+
+    async def start(self) -> None:
+        self.producer = AIOKafkaProducer(
+            bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+        )
+        await self.producer.start()
+        log.info("sink=kafka topic=%s", self.topic)
+
+    async def write(self, rows: list[list]) -> None:
+        for ingested_at, source_code, raw_payload in rows:
+            envelope = json.dumps(
+                {
+                    "source_code": source_code,
+                    "ingested_at": ingested_at.isoformat(),
+                    "payload": raw_payload,
+                }
+            ).encode("utf-8")
+            # send()는 producer 내부 버퍼에 넣기만 함(빠름) → 마지막에 flush()로 한 번에 전송 대기.
+            # send_and_wait()을 건별로 쓰면 메시지마다 브로커 ack을 기다려 배치 이점이 사라진다.
+            await self.producer.send(self.topic, value=envelope, key=source_code.encode("utf-8"))
+        await self.producer.flush()
+
+
 class TickerBuffer:
-    """수집한 ticker 메시지를 모아 ClickHouse에 batch insert.
+    """수집한 ticker 메시지를 모아 sink에 batch write.
 
     row = [ingested_at(datetime), source_code(str), raw_payload(str)]
     """
 
-    COLUMNS = ["ingested_at", "source_code", "raw_payload"]
-
-    def __init__(self, client):
-        self.client = client
+    def __init__(self, sink):
+        self.sink = sink
         self.rows: list[list] = []
         self.last_flush = time.monotonic()
 
@@ -93,10 +154,10 @@ class TickerBuffer:
             or (time.monotonic() - self.last_flush) >= FLUSH_SEC
         )
 
-    def flush(self) -> None:
+    async def flush(self) -> None:
         if not self.rows:
             return
-        self.client.insert("raw_ws__ticker", self.rows, column_names=self.COLUMNS)
+        await self.sink.write(self.rows)
         log.info("flush %d rows", len(self.rows))
         self.rows = []
         self.last_flush = time.monotonic()
@@ -120,22 +181,31 @@ async def consume(source_code: str, url: str, buffer: TickerBuffer) -> None:
                     ingested_at = datetime.now(timezone.utc)
                     buffer.add([ingested_at, source_code, message])
                     if buffer.should_flush():
-                        buffer.flush()
+                        await buffer.flush()
         except Exception as e:
             log.error("%s 연결 끊김: %s → %ds 후 재접속", source_code, e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, BACKOFF_MAX)  # 지수 백오프
 
 
-async def main() -> None:
+async def main(sink_name: str) -> None:
     log.info("WS collector 시작 (ticker, KRW-BTC, %s)", ", ".join(EXCHANGES))
-    client = get_client()
-    buffer = TickerBuffer(client)
-    # 두 거래소는 버퍼를 공유(단일 raw 테이블). 각각 별도 task로 동시 수신.
+    sink = KafkaSink() if sink_name == "kafka" else ClickHouseSink()
+    await sink.start()
+    buffer = TickerBuffer(sink)
+    # 두 거래소는 버퍼를 공유(단일 raw 테이블/토픽). 각각 별도 task로 동시 수신.
     await asyncio.gather(
         *(consume(src, url, buffer) for src, url in EXCHANGES.items())
     )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="WS ticker collector")
+    parser.add_argument(
+        "--sink",
+        choices=["clickhouse", "kafka"],
+        default="clickhouse",
+        help="적재 경로. clickhouse=v0.2 직결(기본·롤백용), kafka=v0.3 producer",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(args.sink))
