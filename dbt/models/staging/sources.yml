@@ -38,17 +38,21 @@ sources:
 
       - name: raw_ws__ticker
         description: |
-          v0.2 WebSocket ticker 원본 (Upbit + Bithumb 2.x 공용, 단일 테이블).
-          ws_collector가 ingested_at + source_code('upbit'|'bithumb') + raw_payload(WS 메시지 JSON) 를 INSERT.
-          두 거래소가 Upbit 표준 포맷으로 동일 → 소스별 raw 분리 없이 source_code 컬럼으로 구분.
+          WebSocket ticker 원본 (전 소스 공용 단일 테이블, source_code 컬럼으로 구분).
+          ws_collector가 ingested_at + source_code + raw_payload(WS 메시지 원문 JSON) 를 INSERT.
+          v0.3 5단계부터 포맷이 다른 소스(coinone·korbit)도 같은 테이블에 원문 그대로 적재하고,
+          파싱은 포맷별 staging(stg_ws__ticker_*)이 담당. 구독응답·PONG 등 비데이터 메시지도 포함됨.
         columns:
           - name: ingested_at
             description: "collector INSERT 시각 (UTC)"
           - name: source_code
-            description: "거래소 구분 ('upbit'|'bithumb'). payload엔 거래소 정보가 없어 이 컬럼이 유일한 출처."
+            description: "거래소 구분 ('upbit'|'bithumb'|'coinone'|'korbit'). payload엔 거래소 정보가 없어 이 컬럼이 유일한 출처."
           - name: raw_payload
             description: |
-              WS ticker 메시지 JSON (양 소스 동일 스키마). 주요 필드:
+              WS 메시지 원문 JSON. 포맷이 소스별로 다름 —
+              coinone: {response_type, channel, data:{last, timestamp, target_volume, ...}} (숫자 STRING)
+              korbit:  {type, symbol, timestamp, snapshot?, data:{close, lastTradedAt, volume, ...}} (가격 STRING)
+              upbit·bithumb (Upbit 표준) 주요 필드:
               - code: 마켓 코드 (STRING, 'KRW-BTC'). asset_code 매핑 대상.
               - trade_price: 체결가 (NUMBER, KRW). upbit=소수·bithumb=정수지만 JSONExtractFloat로 공통 처리.
               - trade_timestamp: 체결 시각 (Unix ms, INT). ts_utc 매핑 대상.

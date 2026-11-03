@@ -13,7 +13,7 @@ models:
         tests:
           - not_null
       - name: source_code
-        description: "소스 코드 ('upbit' | 'bithumb')"
+        description: "소스 코드 ('upbit' | 'bithumb' | 'coinone' | 'korbit')"
         tests:
           - not_null
       - name: ts_minute_utc

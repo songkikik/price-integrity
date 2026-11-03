@@ -14,6 +14,10 @@ v0.3: 버퍼가 내려갈 곳(sink)만 교체 가능하게 분리.
   → 수집과 저장이 분리되어 ClickHouse가 죽어도 수집은 계속된다(= v0.3의 목적).
 연결관리·버퍼링 로직은 이 프로젝트의 핵심 자산이라 sink만 갈아끼우고 그대로 재사용한다.
 
+v0.3 5단계: Coinone·Korbit 추가 (Upbit 표준 포맷 아님).
+소스별 설정(EXCHANGES)으로 url·구독 메시지·앱 레벨 PING만 분기. 원문은 그대로 적재하고
+포맷별 파싱은 dbt staging(stg_ws__ticker_*)이 담당 → loader·Kafka 토픽은 무수정.
+
 실행:
   uv run python collectors/ws_collector.py                # ClickHouse 직결 (v0.2)
   uv run python collectors/ws_collector.py --sink kafka   # Kafka producer (v0.3)
@@ -41,20 +45,52 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# 두 거래소 공통: WSS URL만 다르고 구독 메시지·응답 포맷은 동일(Upbit 표준).
-EXCHANGES = {
-    "upbit": "wss://api.upbit.com/websocket/v1",
-    "bithumb": "wss://ws-api.bithumb.com/websocket/v1",
-}
-SUBSCRIBE = [
+# Upbit 표준 포맷: Upbit·Bithumb 2.x 공통 구독 메시지 (리스트 1개 = 메시지 1건).
+UPBIT_FMT_SUBSCRIBE = [
     {"ticket": "price-integrity"},
     {"type": "ticker", "codes": ["KRW-BTC"]},
     {"format": "DEFAULT"},
 ]
 
+# v0.3 5단계: 소스별 설정. 포맷이 달라도 collector는 "원문 그대로 raw에 적재"만 하므로
+# 소스마다 다른 것은 url·구독 메시지·keepalive 방식뿐이다. 파싱 차이는 dbt staging이 흡수.
+#   subscribe: 연결 직후 보낼 메시지 목록 (각 원소를 JSON 1건으로 송신)
+#   app_ping:  WS 프로토콜 ping과 별개로 서버가 요구하는 앱 레벨 PING 메시지 (없으면 None)
+EXCHANGES = {
+    "upbit": {
+        "url": "wss://api.upbit.com/websocket/v1",
+        "subscribe": [UPBIT_FMT_SUBSCRIBE],
+        "app_ping": None,
+    },
+    "bithumb": {
+        "url": "wss://ws-api.bithumb.com/websocket/v1",
+        "subscribe": [UPBIT_FMT_SUBSCRIBE],
+        "app_ping": None,
+    },
+    # Coinone: 마지막 앱 레벨 PING 후 30분 지나면 서버가 유휴연결로 끊는다(WS ping frame과 별개).
+    "coinone": {
+        "url": "wss://stream.coinone.co.kr",
+        "subscribe": [
+            {
+                "request_type": "SUBSCRIBE",
+                "channel": "TICKER",
+                "topic": {"quote_currency": "KRW", "target_currency": "BTC"},
+            }
+        ],
+        "app_ping": {"request_type": "PING"},
+    },
+    # Korbit(현 디지털엑스): 요청은 항상 대괄호 배열로 감싸야 한다.
+    "korbit": {
+        "url": "wss://ws-api.digitalx.miraeasset.com/v2/public",
+        "subscribe": [[{"method": "subscribe", "type": "ticker", "symbols": ["btc_krw"]}]],
+        "app_ping": None,
+    },
+}
+
 # 연결관리 파라미터
 PING_INTERVAL = 60   # 서버 idle timeout 120초 → 그 전에 ping (라이브러리가 자동 송신)
 PING_TIMEOUT = 10
+APP_PING_SEC = 600   # 앱 레벨 PING 주기 (Coinone idle 30분 → 10분마다)
 BACKOFF_START = 1    # 재접속 지수 백오프 시작(초)
 BACKOFF_MAX = 60
 
@@ -163,25 +199,43 @@ class TickerBuffer:
         self.last_flush = time.monotonic()
 
 
-async def consume(source_code: str, url: str, buffer: TickerBuffer) -> None:
+async def app_ping(ws, message: dict) -> None:
+    """서버가 요구하는 앱 레벨 PING을 주기적으로 송신 (연결이 끊기면 consume이 cancel)."""
+    while True:
+        await asyncio.sleep(APP_PING_SEC)
+        await ws.send(json.dumps(message))
+
+
+async def consume(source_code: str, cfg: dict, buffer: TickerBuffer) -> None:
     """한 거래소 WS에 연결·구독하고 메시지를 버퍼에 적재. 끊기면 백오프 후 재접속."""
     backoff = BACKOFF_START
     while True:
         try:
             async with websockets.connect(
-                url, ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT
+                cfg["url"], ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT
             ) as ws:
-                await ws.send(json.dumps(SUBSCRIBE))
+                for sub in cfg["subscribe"]:
+                    await ws.send(json.dumps(sub))
                 log.info("%s 연결·구독 OK", source_code)
                 backoff = BACKOFF_START  # 연결 성공 시 백오프 리셋
-                async for message in ws:
-                    # Upbit/Bithumb는 binary frame(UTF-8 JSON)로 응답.
-                    if isinstance(message, bytes):
-                        message = message.decode("utf-8")
-                    ingested_at = datetime.now(timezone.utc)
-                    buffer.add([ingested_at, source_code, message])
-                    if buffer.should_flush():
-                        await buffer.flush()
+                ping_task = (
+                    asyncio.create_task(app_ping(ws, cfg["app_ping"]))
+                    if cfg["app_ping"]
+                    else None
+                )
+                try:
+                    async for message in ws:
+                        # Upbit/Bithumb는 binary frame(UTF-8 JSON)로 응답.
+                        # 구독응답·PONG 등 비데이터 메시지도 원문 그대로 적재 → 필터는 stg 책임.
+                        if isinstance(message, bytes):
+                            message = message.decode("utf-8")
+                        ingested_at = datetime.now(timezone.utc)
+                        buffer.add([ingested_at, source_code, message])
+                        if buffer.should_flush():
+                            await buffer.flush()
+                finally:
+                    if ping_task:
+                        ping_task.cancel()
         except Exception as e:
             log.error("%s 연결 끊김: %s → %ds 후 재접속", source_code, e, backoff)
             await asyncio.sleep(backoff)
@@ -193,9 +247,9 @@ async def main(sink_name: str) -> None:
     sink = KafkaSink() if sink_name == "kafka" else ClickHouseSink()
     await sink.start()
     buffer = TickerBuffer(sink)
-    # 두 거래소는 버퍼를 공유(단일 raw 테이블/토픽). 각각 별도 task로 동시 수신.
+    # 모든 거래소가 버퍼를 공유(단일 raw 테이블/토픽). 각각 별도 task로 동시 수신.
     await asyncio.gather(
-        *(consume(src, url, buffer) for src, url in EXCHANGES.items())
+        *(consume(src, cfg, buffer) for src, cfg in EXCHANGES.items())
     )
 
 

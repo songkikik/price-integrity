@@ -3,8 +3,9 @@ version: 2
 models:
   - name: stg_ws__price_tick
     description: |
-      [v0.2 활성 소스] WebSocket raw(raw_ws__ticker)를 공통 스키마로 정규화. int가 참조하는 유일한 stg.
-      Upbit·Bithumb 2.x가 동일 포맷(Upbit 표준)이라 소스 분기 없이 한 모델로 두 소스 파싱.
+      [활성 소스] WebSocket 전 소스를 공통 스키마로 합친 union 모델. int가 참조하는 유일한 stg.
+      v0.3 5단계부터 파싱은 포맷별 모델(stg_ws__ticker_upbit_fmt / _coinone / _korbit)이 담당하고,
+      이 모델은 union all + grain dedup만 수행 (모델명 유지 → int·mart 무수정).
       Grain: (asset_code, source_code, ts_utc). 동일 ts_utc 중복 시 최신 ingested_at 우선.
       source_code는 payload가 아니라 raw 컬럼에서 옴(WS payload엔 거래소 구분 없음).
     columns:
@@ -13,13 +14,16 @@ models:
         tests:
           - not_null
       - name: source_code
-        description: "소스 코드 ('upbit'|'bithumb'). raw 컬럼 유래."
+        description: "소스 코드 ('upbit'|'bithumb'|'coinone'|'korbit'). raw 컬럼 유래."
         tests:
           - not_null
           - accepted_values:
-              values: ['upbit', 'bithumb']
+              values: ['upbit', 'bithumb', 'coinone', 'korbit']
       - name: ts_utc
-        description: "체결 시각 UTC. WS trade_timestamp(ms) 변환. PK 구성 요소."
+        description: |
+          시각 UTC (Unix ms 변환). PK 구성 요소. 소스별 원천 필드:
+          upbit/bithumb=trade_timestamp, korbit=data.lastTradedAt (체결시각),
+          coinone=data.timestamp (ticker 이벤트 시각 — 체결 없는 분에도 직전가 carry-forward 행 가능).
         tests:
           - not_null
       - name: ts_minute_utc
@@ -27,7 +31,9 @@ models:
         tests:
           - not_null
       - name: price
-        description: "체결가 (KRW). WS trade_price (JSONExtractFloat, 소수·정수 공통)."
+        description: |
+          최근 체결가 (KRW). upbit/bithumb=trade_price, coinone=data.last, korbit=data.close.
+          coinone·korbit는 STRING이지만 JSONExtractFloat가 공통 파싱. 0 이하는 assert_stg_ws_no_ghost_tick 이 차단.
         tests:
           - not_null
       - name: quote_ccy
@@ -35,13 +41,75 @@ models:
         tests:
           - not_null
       - name: volume_24h
-        description: "24h 누적 거래량 (BTC). WS acc_trade_volume_24h. nullable."
+        description: |
+          24h 누적 거래량 (BTC 수량). upbit/bithumb=acc_trade_volume_24h, coinone=data.target_volume,
+          korbit=data.volume. ※ coinone quote_volume / korbit quoteVolume 은 KRW 금액이라 사용 금지.
       - name: raw_payload_id
         description: "raw_ws__ticker.ingested_at → string 변환. 역추적 키."
         tests:
           - not_null
       - name: ingested_at
         description: "collector INSERT 시각 UTC."
+        tests:
+          - not_null
+
+  # --- v0.3 5단계: 포맷별 WS 파싱 모델 (dedup 없음 → stg_ws__price_tick 에서 1회 수행) ---
+  - name: stg_ws__ticker_upbit_fmt
+    description: |
+      Upbit 표준 포맷 WS ticker 파싱 (upbit·bithumb 2.x 공용). 기존 stg_ws__price_tick 파싱 로직을 그대로 이동.
+      Grain: raw 메시지 1건 = 1행 (dedup 전).
+    columns:
+      - name: source_code
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['upbit', 'bithumb']
+      - name: ts_utc
+        description: "trade_timestamp(ms) → UTC."
+        tests:
+          - not_null
+      - name: price
+        description: "trade_price (NUMBER, KRW)."
+        tests:
+          - not_null
+
+  - name: stg_ws__ticker_coinone
+    description: |
+      Coinone WS TICKER 파싱. response_type='DATA' & channel='TICKER' & KRW-BTC 만 통과
+      (CONNECTED·SUBSCRIBED·PONG 등 비데이터 메시지는 raw에 남기고 여기서 제외).
+      Grain: raw 메시지 1건 = 1행 (dedup 전).
+    columns:
+      - name: source_code
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['coinone']
+      - name: ts_utc
+        description: "data.timestamp(ms) = ticker 이벤트 시각. 체결시각 필드 없음 (91.5%는 체결시각과 동일, 2026-11-03 샘플)."
+        tests:
+          - not_null
+      - name: price
+        description: "data.last (STRING → Float64, 최근 체결가)."
+        tests:
+          - not_null
+
+  - name: stg_ws__ticker_korbit
+    description: |
+      Korbit(현 디지털엑스) WS ticker 파싱. type='ticker' & symbol='btc_krw' 만 통과.
+      체결이 없어도 ~2.5초마다 같은 lastTradedAt으로 재발행 → union 모델 dedup에서 접힘.
+      Grain: raw 메시지 1건 = 1행 (dedup 전).
+    columns:
+      - name: source_code
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['korbit']
+      - name: ts_utc
+        description: "data.lastTradedAt(ms) = 마지막 체결시각 (D2 정책 부합)."
+        tests:
+          - not_null
+      - name: price
+        description: "data.close (STRING → Float64). 롤링 24h 종가 = 최근 체결가 (샘플 78/79 일치)."
         tests:
           - not_null
 

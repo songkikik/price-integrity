@@ -23,7 +23,7 @@
 | 버퍼 | Kafka `crypto.ticker.v1` | envelope 보관 = 수집/적재 분리점. key=source_code로 소스별 순서 보장 | 파티션 3 · RF 1 |
 | 적재 | `loader/kafka_to_clickhouse.py` | consumer → raw에 batch insert. 수동 오프셋 커밋(at-least-once) | Python (asyncio) |
 | raw | `raw_ws__ticker` | 원본 JSON 보존 (파싱 안 함) | ClickHouse table |
-| staging | `stg_ws__price_tick` | JSON → 공통 스키마 정규화 + grain dedup | view |
+| staging | `stg_ws__ticker_{upbit_fmt,coinone,korbit}` → `stg_ws__price_tick` | 포맷별 JSON 파싱 → union + grain dedup | view |
 | intermediate | `int_crypto__price_tick_long` | 분당 last tick 채택 | view |
 | marts | `fct_crypto__price_spread` 등 | 분×자산 grain spread·anomaly·notification | table |
 
@@ -80,12 +80,35 @@
 |---|---|---|
 | **마일스톤 1** (v0.1) | end-to-end 완성 | ✅ 겹침·fct_spread 검증 → ③ `anomaly_event` → ④ `notification_dispatch` → Slack |
 | **v0.2** | 진짜 실시간 수집 | collector REST 폴링 → **WebSocket push** 전환. 연결관리(재접속·heartbeat), tick 수집. 기존 stg/int/mart **출력 동일성 = 회귀 기준점** |
-| **v0.3** | 수집·저장 분리 | ✅ collector=**producer** → Kafka 토픽 → loader=**consumer** → ClickHouse. offset·replay 학습 완료. 🔜 소스 확장(Coinone·Korbit·Gopax, 최대 5개)으로 producer 다변화 |
+| **v0.3** | 수집·저장 분리 | ✅ collector=**producer** → Kafka 토픽 → loader=**consumer** → ClickHouse. offset·replay 학습 완료. ✅ 소스 확장 Coinone·Korbit 추가(4소스, loader·int·mart 무수정). 🔜 Gopax(최대 5개) |
 
 - **스케일업 도메인 결정 보류**: 글로벌 호가창 arbitrage(정합성 심화, 추천) vs 항공기 추적(정합성 이탈=별도 프로젝트) → 마일스톤 1 완성 후 판단.
 - **제외**: v0.4 k8s(k3s)/Airflow — "24/7 상시가동·셀프힐"용이라 "받고 싶을 때만" 성격과 정반대.
 
-## 현재 상태 (2026-09-23)
+## 현재 상태 (2026-11-04)
+
+- ✅ **v0.3 5단계 = 무중단 소스 추가 (Coinone·Korbit → 4소스).** loader·Kafka 토픽·int·mart **0줄 수정**.
+  - 스펙: 둘 다 무인증 public WS, **Upbit 표준 포맷 아님** → `stg_ws` 단일 모델 전제 붕괴 → **B안 채택**:
+    포맷별 stg(`stg_ws__ticker_upbit_fmt` / `_coinone` / `_korbit`) + `stg_ws__price_tick`은 **이름 유지한 union+dedup 모델**.
+    (버린 안: A=collector에서 Upbit 포맷 변환 → raw 원본 보존 깨짐 / C=단일 stg `multiIf` 분기 → 소스별 테스트 불가)
+  - collector: `EXCHANGES`를 소스별 설정(url·subscribe·app_ping)으로. **Coinone은 앱 레벨 PING 필수**
+    (`{"request_type":"PING"}`, 마지막 PING 후 30분 idle 끊김 → 10분 주기). 비데이터 메시지도 raw에 원문 적재, 필터는 stg.
+  - 필드 매핑(단위 기준): 가격 coinone=`data.last`·korbit=`data.close` (둘 다 STRING) / 24h 거래량(BTC)
+    coinone=`data.target_volume`·korbit=`data.volume`. ⚠️ `quote_volume`·`quoteVolume`은 **KRW 금액**이라 금지.
+  - **시각 정의 차이(문서화)**: korbit=`lastTradedAt`(체결시각, 샘플 79/79 일치 → D2 부합).
+    coinone=`data.timestamp`는 **ticker 이벤트 시각**(91.5% 체결시각과 동일, 나머지는 분 경계·호가 변화 재발행)
+    → 가격은 항상 직전 체결가지만 **체결 없는 분에도 carry-forward 행이 생길 수 있음** (D2와의 의도된 차이).
+  - 신규 singular test `assert_stg_ws_no_ghost_tick`: JSONExtract*는 파싱 실패 시 0 반환 → price≤0 / ts<2020 차단.
+  - **검증(2026-11-03, 10분 Kafka E2E)**: lag 0 · stg grain 중복 0 · dbt PASS=95/ERROR=0 ·
+    10분 전부 n_sources_active=4 · spread 0.049~0.1037% · 소스별 분 median 대비 편차 최대 6.43bp · anomaly/dispatch 0행.
+  - **회귀**: 동점 그룹 제외 시 변경 전/후 stg 행 해시 완전 일치(upbit 7,030 / bithumb 2,836), int 기준값 동일.
+  - ⚠️ **발견(기존 버그, 미수정)**: stg dedup `order by ingested_at desc`는 **동점 시 비결정적**.
+    `ingested_at`이 ms 정밀도라 같은 ms 다중 체결(upbit 129그룹·393행)이 같은 키 → 실행계획 따라 다른 행 채택.
+    결정적 tie-breaker(예: payload 해시·메시지 timestamp) 추가는 별도 작업으로 분리.
+  - ⚠️ Kafka 파티션 쏠림: 4개 key가 전부 파티션 0·1로 해시 → 파티션 2 비어 있음. 정합성 무관(소스별 순서는 유지), 부하만 편중.
+- 🔜 **다음**: (a) dedup tie-breaker 결정화 (b) Gopax 추가(5번째 소스) (c) replay 시 raw 비대 정리(`ReplacingMergeTree`).
+
+## 이전 상태 (2026-09-23)
 
 - ✅ **v0.3 Kafka 디커플링 완성 (0~4단계).** dbt **0줄 수정**으로 통과 = 회귀 기준점 유지.
   - 구성: Kafka 3.9 KRaft 단일 브로커 / 토픽 `crypto.ticker.v1`(파티션 3·RF 1·auto-create off) /
@@ -102,8 +125,7 @@
     정합성 비교는 **모든 유입 정지 → build 1회 → 스냅샷** 순서를 지킬 것. (1차 실험이 이것 때문에 어긋남)
   - ⚠️ 미정리: replay 할 때마다 raw가 2만 행씩 붐. 실무라면 `ReplacingMergeTree`나 구간 삭제 절차 필요 —
     학습용이라 의도적으로 방치 중.
-- 🔜 **다음**: v0.3 5단계 = 무중단 소스 추가(Coinone/Korbit **WS 스펙 조사 선행**).
-  Upbit 표준 포맷이 아니면 `stg_ws` 단일 모델 전제가 깨지므로 조사 결과 보고 판단.
+- (→ 2026-11-04 v0.3 5단계로 완료) 무중단 소스 추가(Coinone/Korbit WS 스펙 조사 선행).
 
 ## 이전 상태 (2026-08-30)
 
